@@ -6,11 +6,12 @@
 #
 # 🔄 What it does:
 # 1. Runs every 55 minutes (or manually via workflow_dispatch).
-# 2. Generates a JWT using GitHub App credentials.
-# 3. Uses the JWT to request an installation access token.
-# 4. Fetches the repository's public key.
-# 5. Encrypts the token using libsodium.
-# 6. Updates the `GH_PAT` secret using the GitHub REST API.
+# 2. Installs dependencies including PyNaCl.
+# 3. Generates a JWT using GitHub App credentials.
+# 4. Uses the JWT to request an installation access token.
+# 5. Fetches the repository's public key.
+# 6. Encrypts the token using Python and PyNaCl.
+# 7. Updates the `GH_PAT` secret using the GitHub REST API.
 #
 # 🔐 Required Repository Secrets:
 # - APP_ID: GitHub App ID
@@ -37,6 +38,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y jq curl libsodium-dev
+          pip install pynacl
 
       - name: Generate GitHub App token
         id: generate_token
@@ -73,23 +75,31 @@ jobs:
             https://api.github.com/repos/${{ github.repository }}/actions/secrets/public-key)
           echo "key=$(echo "$response" | jq -r .key)" >> $GITHUB_OUTPUT
           echo "key_id=$(echo "$response" | jq -r .key_id)" >> $GITHUB_OUTPUT
-    
-      - name: Install PyNaCl
-        run: pip install pynacl
 
       - name: Encrypt token using libsodium
         id: encrypt_token
+        env:
+          TOKEN: ${{ steps.generate_token.outputs.token }}
+          PUBLIC_KEY: ${{ steps.public_key.outputs.key }}
         run: |
-          echo -n "${{ steps.generate_token.outputs.token }}" > token.txt
-          key_b64="${{ steps.public_key.outputs.key }}"
-          echo "$key_b64" | base64 -d > key.bin
-          encrypted=$(echo -n "${{ steps.generate_token.outputs.token }}" | \
-            python3 -c "import sys, base64, nacl.public; \
-              key = base64.b64decode('$key_b64'); \
-              box = nacl.public.SealedBox(nacl.public.PublicKey(key)); \
-              encrypted = box.encrypt(sys.stdin.buffer.read()); \
-              print(base64.b64encode(encrypted).decode())")
-          echo "encrypted_value=$encrypted" >> $GITHUB_OUTPUT
+          python3 - <<EOF
+          import os, base64, sys
+          from nacl.public import PublicKey, SealedBox
+
+          token = os.environ["TOKEN"]
+          key_b64 = os.environ["PUBLIC_KEY"]
+
+          try:
+              key_bytes = base64.b64decode(key_b64)
+              if len(key_bytes) != 32:
+                  raise ValueError("Decoded public key is not 32 bytes")
+              sealed_box = SealedBox(PublicKey(key_bytes))
+              encrypted = sealed_box.encrypt(token.encode())
+              print(f"encrypted_value={base64.b64encode(encrypted).decode()}")
+          except Exception as e:
+              print(f"::error:: Failed to encrypt token: {e}")
+              sys.exit(1)
+          EOF
 
       - name: Update GH_PAT secret using GitHub REST API
         run: |
@@ -102,3 +112,4 @@ jobs:
             "encrypted_value": "${{ steps.encrypt_token.outputs.encrypted_value }}",
             "key_id": "${{ steps.public_key.outputs.key_id }}"
           }
+          EOF
