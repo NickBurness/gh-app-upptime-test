@@ -1,3 +1,31 @@
+# ------------------------------------------------------------------------------
+# 🛠️ GitHub Actions Workflow: Refresh GH_PAT using GitHub App
+#
+# This workflow automates the process of generating a GitHub App installation
+# token and storing it as a repository secret named `GH_PAT`.
+#
+# 🔄 What it does:
+# 1. Runs every 55 minutes (or manually via workflow_dispatch).
+# 2. Authenticates the GitHub CLI using the default GITHUB_TOKEN.
+# 3. Generates a JWT (JSON Web Token) using pure bash:
+#    - GitHub App ID (`APP_ID`)
+#    - Private key (`PRIVATE_KEY`)
+#    - Current timestamp (iat/exp claims)
+# 4. Uses the JWT to request an installation access token from GitHub's REST API.
+# 5. Extracts the token from the response.
+# 6. Uses the GitHub CLI (`gh secret set`) to update the `GH_PAT` secret in the repo.
+#
+# 🔐 Required Repository Secrets:
+# - APP_ID: GitHub App ID
+# - INSTALLATION_ID: GitHub App Installation ID
+# - PRIVATE_KEY: GitHub App private key (.pem contents)
+#
+# ✅ Benefits:
+# - No need for a personal access token (PAT)
+# - Fully automated and secure
+# - Keeps `GH_PAT` up to date with a short-lived GitHub App token
+# ------------------------------------------------------------------------------
+
 name: Refresh GH_PAT from GitHub App
 
 on:
@@ -6,25 +34,49 @@ on:
   workflow_dispatch:
 
 jobs:
-  refresh-token:
+  refresh-gh-pat:
     runs-on: ubuntu-latest
     permissions:
-      actions: write
       contents: read
+      actions: write
 
     steps:
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gh jq
+
+      - name: Authenticate GitHub CLI
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | gh auth login --with-token
+
       - name: Generate GitHub App token
         id: generate_token
-        uses: tibdex/github-app-token@v2
-        with:
-          app_id: ${{ secrets.APP_ID }}
-          installation_id: ${{ secrets.INSTALLATION_ID }}
-          private_key: ${{ secrets.PRIVATE_KEY }}
-
-      - name: Update GH_PAT secret
-        uses: hmanzur/actions-set-secret@v2.2.0
-        with:
-          name: GH_PAT
-          value: ${{ steps.generate_token.outputs.token }}
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APP_ID: ${{ secrets.APP_ID }}
+          INSTALLATION_ID: ${{ secrets.INSTALLATION_ID }}
+          PRIVATE_KEY: ${{ secrets.PRIVATE_KEY }}
+        run: |
+          iat=$(date +%s)
+          exp=$((iat + 540))
+          header='{"alg":"RS256","typ":"JWT"}'
+          payload=$(jq -n --arg iat "$iat" --arg exp "$exp" --arg iss "$APP_ID" \
+            '{iat: ($iat|tonumber), exp: ($exp|tonumber), iss: $iss}')
+          b64enc() { openssl base64 -e -A | tr '+/' '-_' | tr -d '='; }
+          jwt_header=$(echo -n "$header" | b64enc)
+          jwt_payload=$(echo -n "$payload" | b64enc)
+          unsigned_token="$jwt_header.$jwt_payload"
+          jwt_signature=$(echo -n "$unsigned_token" | \
+            openssl dgst -sha256 -sign <(echo "$PRIVATE_KEY") | b64enc)
+          jwt="$unsigned_token.$jwt_signature"
+
+          token_response=$(curl -s -X POST \
+            -H "Authorization: Bearer $jwt" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/app/installations/$INSTALLATION_ID/access_tokens)
+
+          echo "token=$(echo "$token_response" | jq -r .token)" >> $GITHUB_OUTPUT
+
+      - name: Update GH_PAT secret using GitHub CLI
+        run: |
+          echo "${{ steps.generate_token.outputs.token }}" | \
+          gh secret set GH_PAT --repo ${{ github.repository }}
