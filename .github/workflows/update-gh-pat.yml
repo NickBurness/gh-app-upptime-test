@@ -85,7 +85,7 @@ jobs:
           TOKEN: ${{ steps.generate_token.outputs.token }}
           PUBLIC_KEY: ${{ steps.public_key.outputs.key }}
         run: |
-          python3 - <<EOF
+          encrypted_value=$(python3 - <<EOF
           import os, base64, sys
           from nacl.public import PublicKey, SealedBox
 
@@ -98,11 +98,14 @@ jobs:
                   raise ValueError("Decoded public key is not 32 bytes")
               sealed_box = SealedBox(PublicKey(key_bytes))
               encrypted = sealed_box.encrypt(token.encode())
-              print(f"encrypted_value={base64.b64encode(encrypted).decode()}")
+              print(base64.b64encode(encrypted).decode())
           except Exception as e:
               print(f"::error:: Failed to encrypt token: {e}")
               sys.exit(1)
           EOF
+          )
+          echo "encrypted_value=$encrypted_value" >> $GITHUB_OUTPUT
+
 
       - name: Update GH_PAT secret using GitHub REST API
         run: |
