@@ -106,16 +106,19 @@ jobs:
           )
           echo "encrypted_value=$encrypted_value" >> $GITHUB_OUTPUT
 
-
-      - name: Update GH_PAT secret using GitHub REST API
+      - name: Update GH_PAT secret using GitHub App token
+        env:
+          GH_APP_TOKEN: ${{ steps.generate_token.outputs.token }}
+          ENCRYPTED_VALUE: ${{ steps.encrypt_token.outputs.encrypted_value }}
+          KEY_ID: ${{ steps.public_key.outputs.key_id }}
         run: |
           curl -X PUT \
-            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Authorization: Bearer $GH_APP_TOKEN" \
             -H "Accept: application/vnd.github+json" \
             https://api.github.com/repos/${{ github.repository }}/actions/secrets/GH_PAT \
             -d @- <<EOF
           {
-            "encrypted_value": "${{ steps.encrypt_token.outputs.encrypted_value }}",
-            "key_id": "${{ steps.public_key.outputs.key_id }}"
+            "encrypted_value": "$ENCRYPTED_VALUE",
+            "key_id": "$KEY_ID"
           }
           EOF
